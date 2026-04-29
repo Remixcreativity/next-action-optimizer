@@ -76,7 +76,8 @@ CORE RULES:
 3. Each must reference something specific from the user's task list
 4. Each must produce a visible state change
 5. No motivational language
-6. Every candidate MUST include all tags AND reason_chips (2-4 chips each)
+6. Every candidate MUST include all tags, reason_chips (2-4 chips), and policy fields:
+   leverage_score, leverage_reason, action_size, estimated_difficulty
 
 BEHAVIORAL RULES — apply strictly based on ACTIVE THREAD:
 
@@ -187,6 +188,19 @@ ACTION TAGS (required for all):
 - time_bucket: under_2min | 2_5min | 5_10min | 10_30min
 - friction_risk: low | medium | high
 
+POLICY FIELDS (required for all):
+- leverage_score: integer 1-5
+  1 = low-value maintenance, 3 = useful habit/maintenance, 5 = high-leverage project/urgent bottleneck
+- leverage_reason: one short sentence explaining the value
+- action_size: entry | tiny | small_win | focused_progress | deep_work
+- estimated_difficulty: integer 1-5
+
+Policy field rules:
+- Low energy or tired state → prefer entry/tiny/small_win and difficulty 1-2
+- 30 min + high energy → allow focused_progress/deep_work if project/urgent task exists
+- no_motivation → visible_result true and action_size small_win or focused_progress
+- skipped/friction → reduce action_size before switching away from valuable threads
+
 REASON CHIPS (required, 2-4 per candidate):
 Use ONLY these chips:
 Progress: "visible result" | "continuing thread" | "finished" | "entry point"
@@ -226,7 +240,7 @@ When availableMinutes = 30 AND energy = high:
 - Bad: "Work on NAO app." — Good: "Open App.jsx and add parent_task_id to normalizeCandidate(), verify one candidate has correct parent_task_id."
 
 OUTPUT: Respond ONLY with valid JSON. No preamble. No markdown.
-{"candidates":[{"parent_task_id":"t_work_on_nao_app","parent_task_title":"work on NAO app","action":"...","why":"...","estimated_minutes":30,"confidence":0.8,"reason_chips":["visible result","important"],"tags":{"task_type":"project","size":"medium","clarity":"high","visible_result":true,"energy_required":"high","time_bucket":"10_30min","friction_risk":"low"}}]}
+{"candidates":[{"parent_task_id":"t_work_on_nao_app","parent_task_title":"work on NAO app","action":"...","why":"...","estimated_minutes":30,"confidence":0.8,"leverage_score":5,"leverage_reason":"Moves the important app thread forward with visible progress.","action_size":"focused_progress","estimated_difficulty":3,"reason_chips":["visible result","important"],"tags":{"task_type":"coding","size":"medium","clarity":"high","visible_result":true,"energy_required":"high","time_bucket":"10_30min","friction_risk":"low"}}]}
 `.trim();
 
 // ─── MESSAGE BUILDER ──────────────────────────────────────────────────────────
