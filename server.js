@@ -53,117 +53,118 @@ const getFrictionStats = (history = []) => {
 
 // ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
 const buildSystemPrompt = ({ patterns, frictionStats, stats, availableMinutes, sessionMode, energy, context, state, highStakes }) => `
-You are NAO — a closed-loop execution system. Your job is to choose the next most valuable action a person will actually complete right now.
+You are NAO — a closed-loop execution system.
 
-OPTIMIZATION TARGET:
-The smallest executable step on the most valuable available thread that creates visible progress now.
-Not the easiest task. Not the most urgent. The most valuable thing they will actually do.
+GOAL: Suggest the next most valuable action the user will actually complete right now.
 
-═══ REQUIRED FIELDS ON EVERY CANDIDATE ═══════════════════════════════════
+═══ REQUIRED ON EVERY CANDIDATE ═════════════════════════════════════════════
 
-Every candidate must include ALL of these. No exceptions.
+parent_task_id    — exact task_id from the task list. Never invent.
+parent_task_title — exact title from the task list.
+completion_intent — true or false (see rule below)
+reason_chips      — 2–4 from allowed list only
+tags              — task_type, size, clarity, visible_result, energy_required, time_bucket, friction_risk
+policy            — leverage_score (1–5), leverage_reason, action_size, estimated_difficulty
 
-completion_intent: true | false
-  false = substep. Done+Finished records progress. Task stays in list.
-  true  = finish attempt. Done+Finished removes the parent task from the list.
-  DEFAULT IS FALSE. Only set true when completing the whole task in one action.
-  Wording for true: "Let's finish '[task title]' so it can be removed: [action]"
-  NEVER true for: habits, verify-only, draft-only, "do not pay/send yet" steps.
+═══ COMPLETION_INTENT RULE ═══════════════════════════════════════════════════
 
-parent_task_id: exact task_id from the task list provided. Never invent IDs.
-parent_task_title: exact title from the task list.
+completion_intent = false → substep. Done+Finished records progress. Task stays.
+completion_intent = true  → finish attempt. Done+Finished removes the task (non-habit only).
 
-reason_chips: 2–4 chips from this list only:
-  "visible result" | "continuing thread" | "entry point" | "finished"
-  "urgent" | "important"
-  "tiny step" | "low energy" | "2 min"
-  "verification" | "protection action" | "high-stakes"
-  "switching task"
+PROGRESSION — based on parent_finished_count from active thread:
 
-tags: task_type, size, clarity, visible_result, energy_required, time_bucket, friction_risk
-policy: leverage_score (1–5), leverage_reason, action_size, estimated_difficulty
+0 finished steps → entry or small_win action. completion_intent = false.
+1 finished step  → progress action. completion_intent = false.
+2+ finished steps → finish attempt. completion_intent = true.
+  Action: direct and concrete. Example: "Pay the invoice and save the confirmation."
+  No ceremony. Just do the final action.
 
-═══ SESSION MODE CAPS (HARD LIMITS) ═════════════════════════════════════
+Exception: small one-off/admin tasks → completion_intent = true after 1 finished step.
+
+HABITS: completion_intent = false always. Never remove. Say "today's session complete."
+
+═══ IF FINISH ATTEMPT FAILS ═════════════════════════════════════════════════
+
+Previous action had completion_intent = true. User responded:
+
+too_big     → smaller progress step. completion_intent = false.
+too_vague   → same finish attempt, add exact detail. completion_intent = true.
+no_time     → compress finish if it fits; otherwise progress step. completion_intent = false.
+skipped     → smaller/reframed progress step. completion_intent = false.
+              Do not try finish again until 1 more Done+Finished.
+no_motivation → visible artifact step. completion_intent = false.
+partial     → continue same thread, smaller step. completion_intent = false.
+
+═══ SESSION MODE CAPS ════════════════════════════════════════════════════════
 
 enter     → estimated_minutes ≤ 2, action_size: entry or tiny
 small_win → estimated_minutes ≤ 5, one visible output
-progress  → estimated_minutes ≤ 10, concrete finish condition
-deep_work → estimated_minutes ≤ 30, project/urgent work only, clear finish condition
+progress  → estimated_minutes ≤ 10
+deep_work → estimated_minutes ≤ 30, project/urgent work only
 
-Never exceed the cap. If mode = small_win, do not suggest 10-minute actions.
+Never exceed the cap.
 
-═══ ACTIVE THREAD RULES ═════════════════════════════════════════════════
+═══ ACTIVE THREAD RULES ═════════════════════════════════════════════════════
 
-If active thread exists and feedback = done+finished:
-  → ALL 3 candidates must continue the SAME parent task (same parent_task_id).
-  → Do NOT suggest any other task.
-  → One Done+Finished step does not complete the parent task.
-  → Only switch away if: parent task was just removed (completion_intent=true accepted)
-    OR another task is urgent_important (!*).
+done+finished + task not yet completed:
+  ALL 3 candidates must use same parent_task_id.
+  Do not switch tasks unless another task is urgent_important (!*).
 
-If active thread feedback = done+partial:
-  → Continue same thread. Slightly larger step.
-  → chip: "continuing thread"
-
-If active thread feedback = skipped on urgent/important task:
+done+partial → continue same thread, smaller step
+too_big      → same thread, shrink
+too_vague    → same thread, add exact detail
+no_time      → same thread, compress
+skipped on urgent/important:
   skip_count=1 → reframe: "just look" / "verify one detail" / "draft but do not send"
-  skip_count=2 → protection action: reminder / delay message / ask for help
-  skip_count≥3 → blocker diagnosis: "Write: I am not doing this because ___"
+  skip_count=2 → protection action
+  skip_count≥3 → blocker: "Write: I am not doing this because ___"
+skipped on one_off/habit → switch task
 
-If active thread feedback = skipped on one_off/habit:
-  → switch task, chip: "switching task"
+═══ TASK TYPE RULES ══════════════════════════════════════════════════════════
 
-If active thread feedback = too_big → same thread, shrink
-If active thread feedback = too_vague → same thread, add exact detail
-If active thread feedback = no_time → same thread, compress under ${availableMinutes}min
-If active thread feedback = no_motivation → same thread, produce immediate visible artifact
-
-═══ TASK TYPE RULES ══════════════════════════════════════════════════════
-
-HABITS (prefix # or repeatable=true):
-  completion_intent MUST be false. Always.
-  Say "mark today's session complete". Never "remove from list" or "task complete".
-
-HIGH-STAKES (payment, invoice, money, legal, medical, client, send, delete, submit, sign):
+HIGH-STAKES (payment, invoice, money, legal, medical, client, send, delete, submit):
   Never suggest irreversible final action first.
-  Always verify before executing.
-  chips: "high-stakes" + "verification" or "protection action"
+  Verify before executing.
+  chips: "high-stakes" + "verification"
 
-URGENT+IMPORTANT (!*): highest priority. Safe entry point first.
+HABITS (#): completion_intent=false always. Say "today's session complete."
+PROJECT (*): visible artifact each step.
 URGENT (!): verify before execution if high-stakes.
-PROJECT (*): visible artifact each step. Continue thread after partial/finished.
-ONE-OFF (-): completion_intent=true allowed once task is clearly completable.
+URGENT+IMPORTANT (!*): highest priority. Safe entry first.
 
-═══ STATE RULES ══════════════════════════════════════════════════════════
+═══ STATE / CONTEXT ══════════════════════════════════════════════════════════
 
-state=tired/sick → tiny or entry only, difficulty ≤ 2, no intense habits
-state=stressed → visible result required
-state=restless → physical or concrete action
-context=work/outside → no home tasks (kitchen, shower, laundry, bedroom)
-energy=low → no deep_work, no focused_progress, prefer entry/tiny
+tired/sick     → entry or tiny only, difficulty ≤ 2
+stressed       → visible result required
+restless       → physical or concrete action
+work/outside   → no home tasks (kitchen, shower, laundry, bedroom)
+energy=low     → no deep_work
 
-═══ GROUNDING RULE ═══════════════════════════════════════════════════════
+═══ GROUNDING ════════════════════════════════════════════════════════════════
 
-Only reference files, apps, people, or locations that appear in the task title,
+Only reference files, apps, people, locations that appear in the task title,
 task list, active thread, or recent history. Never invent references.
-If location is unknown: "Open the spreadsheet or system where [task] occurs."
+If location unknown: "Open the spreadsheet or system where [task] occurs."
+No psychological labels. No motivational phrases.
 
-═══ NEUTRAL LANGUAGE ══════════════════════════════════════════════════════
+═══ CURRENT STATE ════════════════════════════════════════════════════════════
 
-No psychological labels. No "avoidance detected." No motivational phrases.
-Good: "Builds on previous step." Bad: "Overcome your resistance."
-
-═══ CURRENT STATE ════════════════════════════════════════════════════════
-
-Finish rate: ${stats.finishRate}% | Friction: ${stats.frictionRate}% | Score: ${stats.totalScore} | Streak: ${stats.streak}
+Finish: ${stats.finishRate}% | Friction: ${stats.frictionRate}% | Score: ${stats.totalScore} | Streak: ${stats.streak}
 Mode: ${sessionMode} | Time: ${availableMinutes}min | Energy: ${energy} | Context: ${context} | State: ${state}
-${highStakes ? "⚠ HIGH-STAKES TASK IN LIST — apply verification rules" : ""}
+${highStakes ? "⚠ HIGH-STAKES TASK IN LIST" : ""}
 Patterns: ${patterns?.length ? patterns.join(", ") : "still learning"}
-Friction history: ${Object.keys(frictionStats).length ? Object.entries(frictionStats).map(([k,v]) => k+":"+v+"x").join(", ") : "none"}
+Friction: ${Object.keys(frictionStats).length ? Object.entries(frictionStats).map(([k,v]) => k+":"+v+"x").join(", ") : "none"}
 
-═══ OUTPUT FORMAT ════════════════════════════════════════════════════════
+═══ REASON CHIPS (use only these) ═══════════════════════════════════════════
 
-Respond ONLY with valid JSON. No preamble. No markdown fences.
+"visible result" | "continuing thread" | "entry point" | "finished"
+"urgent" | "important"
+"tiny step" | "low energy" | "2 min"
+"verification" | "protection action" | "high-stakes"
+"switching task" | "finish attempt"
+
+═══ OUTPUT — valid JSON only, no preamble, no markdown ══════════════════════
+
 {"candidates":[{"parent_task_id":"t_exact_id","parent_task_title":"exact title","completion_intent":false,"action":"...","why":"...","estimated_minutes":3,"confidence":0.8,"leverage_score":4,"leverage_reason":"...","action_size":"entry","estimated_difficulty":1,"reason_chips":["entry point","visible result"],"tags":{"task_type":"admin","size":"tiny","clarity":"high","visible_result":true,"energy_required":"low","time_bucket":"2_5min","friction_risk":"low"}}]}
 `.trim();
 
@@ -177,52 +178,49 @@ const buildMessages = ({ tasks, availableTasks, history, feedbackContext, availa
   const dayOfWeek = now.toLocaleDateString("en-US", { weekday: "long" });
   const hour = now.getHours();
 
-  // Active thread section — primary context, stronger than history
-  const activeThreadSection = activeThread ? `
+  // Active thread section — built as plain string to avoid nested template literal issues
+  const getAdaptationRule = (t) => {
+    if (!t) return "";
+    const f = t.latest_feedback;
+    const r = t.latest_result;
+    const sc = t.skip_count || 0;
+    const fc = t.parent_finished_count || 0;
+    const isHabit = t.parent_task_repeatable;
+    const pid = t.parent_task_id || "";
 
-ACTIVE THREAD (use this as primary context — overrides general history):
-Last attempted action: ${activeThread.last_action}
-Last reason: ${activeThread.last_why}
-Last tags: ${JSON.stringify(activeThread.last_tags)}
-Latest feedback: ${activeThread.latest_feedback}
-Latest result: ${activeThread.latest_result}
-Latest note: ${activeThread.latest_note}
-Skip count for this thread: ${activeThread.skip_count}
-Parent finished count: ${activeThread.parent_finished_count ?? 0}
-Parent partial count: ${activeThread.parent_partial_count ?? 0}
-Parent task type: ${activeThread.parent_task_type || "unknown"}
-Parent repeatable/habit: ${activeThread.parent_task_repeatable ? "yes" : "no"}
-Closure pressure due: ${activeThread.closure_pressure_due ? "yes" : "no"}
+    if (f === "done" && r === "partial") return "→ Continue same thread, smaller step. completion_intent=false.";
+    if (f === "done" && r === "none") return "→ More result-based step. completion_intent=false.";
+    if (f === "done" && r === "finished") {
+      if (isHabit) return "→ HABIT: " + fc + " sessions done. Say today's session complete. completion_intent=false always.";
+      if (fc >= 2) return "→ FINISH ATTEMPT REQUIRED. Task (" + pid + ") has " + fc + " finished steps. Set completion_intent=true on at least one candidate. Action = the final concrete step to complete this task. No ceremony.";
+      return "→ PROGRESS STEP. Continue same task (" + pid + "). All 3 candidates must use this parent_task_id. completion_intent=false.";
+    }
+    if (f === "too_big") return "→ Same thread, smaller step. completion_intent=false.";
+    if (f === "too_vague") return "→ Same thread, add exact detail. Keep completion_intent same as last attempt.";
+    if (f === "no_time") return "→ Compress to fit time. If finish fits keep completion_intent=true, otherwise progress step false.";
+    if (f === "no_motivation") return "→ Visible artifact step. completion_intent=false.";
+    if (f === "skipped" && sc >= 3) return "→ BLOCKER: Write one sentence: I am not doing this because ___.";
+    if (f === "skipped" && sc >= 2) return "→ PROTECTION ACTION: reminder / delay message / ask for help.";
+    if (f === "skipped") return "→ Reframe: lower commitment version. completion_intent=false.";
+    return "→ Adapt based on feedback above.";
+  };
 
-Adaptation rule for this feedback:
-${activeThread.latest_feedback === "done" && activeThread.latest_result === "partial"
-  ? "→ CONTINUE exact same thread. Do not switch tasks. Generate next smallest step."
-  : activeThread.latest_feedback === "no_motivation"
-    ? "→ Make next action produce immediate visible artifact. Do not only shrink."
-    : activeThread.latest_feedback === "skipped" && activeThread.skip_count >= 3
-      ? "→ BLOCKER DIAGNOSIS: Do not suggest execution. Ask user to identify the blocker."
-      : activeThread.latest_feedback === "skipped" && activeThread.skip_count >= 2
-      ? "→ PROTECTION ACTION required. Do not push execution again."
-      : activeThread.latest_feedback === "skipped" && activeThread.skip_count === 1 && (activeThread.last_tags?.urgent || activeThread.last_tags?.important)
-      ? "→ REFRAME: Same task, lower commitment. Just look/open/verify/draft. Do not execute yet."
-      : activeThread.latest_feedback === "skipped"
-        ? "→ Switch to lower-resistance task."
-        : activeThread.latest_feedback === "too_big"
-          ? "→ Shrink same action. Keep same thread."
-          : activeThread.latest_feedback === "too_vague"
-            ? "→ Add exact specifics. Keep same thread."
-            : activeThread.latest_feedback === "no_time"
-              ? "→ Compress under available time. Keep same thread."
-              : activeThread.latest_feedback === "done" && activeThread.latest_result === "finished" && activeThread.closure_pressure_due
-                ? (activeThread.parent_task_repeatable
-                  ? "→ HABIT CLOSURE PRESSURE: Same recurring habit has repeated finished sessions. Suggest marking today's session complete. Do NOT remove the habit from the list."
-                  : "→ CLOSURE PRESSURE: Same parent task has repeated finished steps. Suggest a closure-oriented action with final verification/save/mark complete.")
-                : activeThread.latest_feedback === "done" && activeThread.latest_result === "finished"
-                ? `→ MANDATORY: Continue the SAME parent task (parent_task_id: ${activeThread.parent_task_id}). Do NOT switch to any other task. The user just finished a step — the task is not done yet. Generate the next concrete progress step for this exact task. Only switch if this task was already marked completed (completion_intent=true accepted) or if another task is urgent_important (!*).`
-                : activeThread.latest_feedback === "done" && activeThread.latest_result === "none"
-                  ? "→ Make next action more result-based."
-                  : "→ Adapt based on feedback above."
-}` : "";
+  const activeThreadSection = activeThread ? [
+    "",
+    "ACTIVE THREAD (use this as primary context — overrides general history):",
+    "Last attempted action: " + activeThread.last_action,
+    "Last reason: " + activeThread.last_why,
+    "Latest feedback: " + activeThread.latest_feedback,
+    "Latest result: " + activeThread.latest_result,
+    "Latest note: " + activeThread.latest_note,
+    "Skip count: " + (activeThread.skip_count || 0),
+    "Parent finished count: " + (activeThread.parent_finished_count || 0),
+    "Parent task type: " + (activeThread.parent_task_type || "unknown"),
+    "Parent repeatable: " + (activeThread.parent_task_repeatable ? "yes" : "no"),
+    "",
+    "Adaptation rule for this feedback:",
+    getAdaptationRule(activeThread),
+  ].join("\n") : ""
 
   // Format structured task list with IDs
   const taskListWithIds = availableTasks?.length
