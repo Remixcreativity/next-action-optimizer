@@ -358,7 +358,7 @@ ${activeThread.latest_feedback === "done" && activeThread.latest_result === "par
                   ? "→ HABIT CLOSURE PRESSURE: Same recurring habit has repeated finished sessions. Suggest marking today's session complete. Do NOT remove the habit from the list."
                   : "→ CLOSURE PRESSURE: Same parent task has repeated finished steps. Suggest a closure-oriented action with final verification/save/mark complete.")
                 : activeThread.latest_feedback === "done" && activeThread.latest_result === "finished"
-                ? "→ Continue same parent task with a slightly larger concrete progress step."
+                ? `→ MANDATORY: Continue the SAME parent task (parent_task_id: ${activeThread.parent_task_id}). Do NOT switch to any other task. The user just finished a step — the task is not done yet. Generate the next concrete progress step for this exact task. Only switch if this task was already marked completed (completion_intent=true accepted) or if another task is urgent_important (!*).`
                 : activeThread.latest_feedback === "done" && activeThread.latest_result === "none"
                   ? "→ Make next action more result-based."
                   : "→ Adapt based on feedback above."
