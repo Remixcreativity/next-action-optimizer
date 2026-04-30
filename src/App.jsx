@@ -82,8 +82,6 @@ const HOME_ONLY_KEYWORDS = [
   'cook','bedroom','bathroom','living room','garden',
 ];
 
-const WORK_BLOCKED_KEYWORDS = [...HOME_ONLY_KEYWORDS];
-
 // Parse prefix from raw task text
 const parsePrefix = (raw) => {
   const t = raw.trim();
@@ -229,39 +227,18 @@ const shouldAutoRemoveCompletedTask = ({ selectedFeedback, finalResult, action, 
   return action?.completion_intent === true;
 };
 
-const getCompletedNonHabitTaskIdsFromState = (rawText = '', ledger = {}, history = []) => {
-  const taskIds = new Set();
-  const rawIds = new Set(rawText.split('\n').map(getTaskIdFromRawLine).filter(Boolean));
-
-  Object.values(ledger || {}).forEach(task => {
-    if (!task?.task_id || task.repeatable || task.task_type === 'habit') return;
-    if (task.status === 'completed') taskIds.add(task.task_id);
-  });
-
-  (history || []).forEach(entry => {
-    if (!entry?.parent_task_id || !rawIds.has(entry.parent_task_id)) return;
-    const task = ledger?.[entry.parent_task_id];
-    if (task?.repeatable || task?.task_type === 'habit') return;
-    if (entry.feedback !== 'done' || entry.result !== 'finished') return;
-    if (entry.completion_intent === true || entry.parent_task_removed === true) taskIds.add(entry.parent_task_id);
-  });
-
-  return taskIds;
-};
-
 const syncCompletedNonHabitTasks = (rawText = '', ledger = {}, history = []) => {
-  const completedIds = getCompletedNonHabitTaskIdsFromState(rawText, ledger, history);
+  // Remove tasks already marked completed in ledger from textarea
+  const completedIds = new Set(
+    Object.values(ledger || {})
+      .filter(t => t?.status === 'completed' && !t.repeatable && t.task_type !== 'habit')
+      .map(t => t.task_id)
+  );
   if (!completedIds.size) return { tasks: rawText, ledger, removedCount: 0 };
-
   const nextTasks = removeTaskLinesByIds(rawText, completedIds);
-  const existing = { ...(ledger || {}) };
-  completedIds.forEach(id => {
-    if (existing[id]) existing[id] = { ...existing[id], status: 'completed' };
-  });
-
   return {
     tasks: nextTasks,
-    ledger: buildTaskLedger(nextTasks, existing),
+    ledger: buildTaskLedger(nextTasks, ledger),
     removedCount: completedIds.size,
   };
 };
@@ -291,6 +268,7 @@ const ALLOWED_REASON_CHIPS = [
   "tiny step", "low energy", "2 min",
   "verification", "protection action", "high-stakes",
   "switching task",
+  "finish attempt",
 ];
 
 const CHIP_COLORS = {
@@ -927,6 +905,46 @@ const extractJsonObject = (text) => {
   return null;
 };
 
+// Force completion_intent=true when progression warrants it
+// Model compliance not reliable — enforce client-side
+const shouldForceFinishAttempt = (candidate, activeThread, taskLedgerSnapshot) => {
+  if (!candidate?.parent_task_id) return false;
+  const task = taskLedgerSnapshot?.[candidate.parent_task_id];
+  if (!task || task.repeatable || task.task_type === 'habit') return false;
+  // Use activeThread finished count if available, otherwise ledger completion_count
+  const finishedCount = activeThread?.parent_task_id === candidate.parent_task_id
+    ? (activeThread.parent_finished_count || 0)
+    : (task.completion_count || 0);
+  return finishedCount >= 2;
+};
+
+const forceFinishIntentCandidates = (candidates = [], activeThread, taskLedgerSnapshot = {}) => {
+  // Find the best candidate eligible for finish attempt
+  // Only one candidate gets forced — others stay as normal progress steps
+  let finishApplied = false;
+
+  return candidates.map(candidate => {
+    // Skip if already applied, not eligible, or is a habit
+    if (finishApplied) return candidate;
+    if (!shouldForceFinishAttempt(candidate, activeThread, taskLedgerSnapshot)) return candidate;
+
+    const task = taskLedgerSnapshot?.[candidate.parent_task_id];
+    const title = task?.clean_title || candidate.parent_task_title || 'this task';
+
+    finishApplied = true;
+    return {
+      ...candidate,
+      completion_intent: true,
+      action: "Let's finish '" + title + "' so it can be removed from your list: " + candidate.action,
+      why: "Finish attempt — Done+Finished will remove this task from your list.",
+      reason_chips: Array.from(new Set([
+        ...(candidate.reason_chips || []),
+        'finish attempt',
+      ])).slice(0, 4),
+    };
+  });
+};
+
 const normalizeCandidate = (candidate) => {
   if (!candidate || typeof candidate !== "object") return null;
   const action = candidate.action || candidate.next_action || candidate.task;
@@ -1506,6 +1524,11 @@ export default function App() {
       const rawTasksForRequest = typeof tasksOverride === 'string' ? tasksOverride : tasks;
       const availableTasksForRequest = getAvailableTasks(ledgerForRequest, context);
 
+      // DEBUG LOGGING
+      console.log("[NAO DEBUG] activeThread sent:", JSON.stringify(activeThreadOverride));
+      console.log("[NAO DEBUG] available tasks:", availableTasksForRequest.map(t => t.task_id + " comp=" + (t.completion_count||0)));
+      console.log("[NAO DEBUG] history last 5:", (historyOverride||[]).slice(-5).map(h => h.feedback + "+" + h.result + " ci=" + h.completion_intent + " task=" + h.parent_task_id));
+
       // App.jsx sends raw context only — server owns behavioral prompting
       const response = await fetch("/api/next-action", {
         method: "POST",
@@ -1546,8 +1569,12 @@ export default function App() {
       const availableCandidates = filterCandidatesByAvailability(parsed.candidates, ledgerForRequest, context);
       const groundedCandidates = filterGroundedCandidates(availableCandidates, ledgerForRequest, rawTasksForRequest);
       const habitSafeCandidates = sanitizeHabitClosureCandidates(groundedCandidates, ledgerForRequest);
-      const modeSafeCandidates = filterCandidatesBySessionMode(habitSafeCandidates, availableMinutes);
+      const forcedIntentCandidates = forceFinishIntentCandidates(habitSafeCandidates, activeThreadOverride, ledgerForRequest);
+      const modeSafeCandidates = filterCandidatesBySessionMode(forcedIntentCandidates, availableMinutes);
+      console.log("[NAO DEBUG] parsed candidates:", (parsed.candidates||[]).map(cd => cd.parent_task_id + " ci=" + cd.completion_intent + " | " + (cd.action||"").slice(0,60)));
+      console.log("[NAO DEBUG] after filters:", modeSafeCandidates.map(cd => cd.parent_task_id + " ci=" + cd.completion_intent));
       const chosen = chooseCandidate(modeSafeCandidates, historyOverride, availableMinutes, energy, ledgerForRequest, state);
+      console.log("[NAO DEBUG] chosen:", chosen?.parent_task_id, "ci=" + chosen?.completion_intent, "score=" + chosen?.final_selection_score);
       return { chosen, candidates: modeSafeCandidates };
     } catch (e) {
       console.error("getAction error:", e);
@@ -1772,12 +1799,16 @@ export default function App() {
     const skipCount = hist.filter(h =>
       h.action === action.action && h.feedback === "skipped"
     ).length;
-    const parentProgress = getParentTaskProgress(hist, action.parent_task_id);
+    const parentTask = action.parent_task_id ? ledger[action.parent_task_id] : null;
+    // Use ledger completion_count as primary — it persists across task switches
+    // history window resets when tasks switch, making it unreliable
+    const finishedCount = parentTask?.completion_count || 0;
+    const isRepeatable = Boolean(parentTask?.repeatable);
     return {
       parent_task_id: action.parent_task_id || null,
       parent_task_title: action.parent_task_title || null,
-      parent_task_type: action.parent_task_id ? ledger[action.parent_task_id]?.task_type || null : null,
-      parent_task_repeatable: action.parent_task_id ? Boolean(ledger[action.parent_task_id]?.repeatable) : false,
+      parent_task_type: parentTask?.task_type || null,
+      parent_task_repeatable: isRepeatable,
       last_action: action.action,
       last_why: action.why,
       last_tags: action.tags,
@@ -1785,10 +1816,10 @@ export default function App() {
       latest_result: feedbackContext.result,
       latest_note: feedbackContext.note || "none",
       skip_count: skipCount,
-      parent_finished_count: parentProgress.finished,
-      parent_partial_count: parentProgress.partial,
-      parent_progress_count: parentProgress.progress,
-      closure_pressure_due: parentProgress.finished >= 2 && feedbackContext.feedback === 'done' && feedbackContext.result === 'finished',
+      parent_finished_count: finishedCount,
+      parent_partial_count: parentTask?.completion_count || 0,
+      parent_progress_count: finishedCount,
+      closure_pressure_due: finishedCount >= 2 && !isRepeatable && feedbackContext.feedback === 'done' && feedbackContext.result === 'finished',
     };
   };
 
